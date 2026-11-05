@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -13,6 +15,16 @@ import zipfile
 
 PHASE = 'configuration'
 CHUNK_BYTES = 1024 ** 3
+
+
+class BuildInterrupted(BaseException):
+    """Stop children promptly and leave files for the separate recovery step."""
+
+
+def interrupt(signum, frame):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise BuildInterrupted()
 
 
 def digest(path):
@@ -39,14 +51,24 @@ def run(command, cwd, log, env, timeout=1200, progress=None):
                     if progress:
                         progress()
         except BaseException:
-            if process.poll() is None:
-                import signal
-                os.killpg(process.pid, signal.SIGTERM)
+            if os.name == 'posix':
                 try:
-                    process.wait(timeout=10)
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                process.terminate()
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    process.kill()
                     process.wait()
+            if os.name == 'posix':
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             raise
 
 
@@ -113,6 +135,7 @@ def execute(work):
     log = result / 'private.log'
     source = work / 'source'
     status = 'failed'
+    interrupted = False
     run_id = os.environ['GITHUB_RUN_ID']
     attempt = os.environ['GITHUB_RUN_ATTEMPT']
     if not re.fullmatch(r'[0-9]+', run_id) or not re.fullmatch(r'[0-9]+', attempt):
@@ -170,12 +193,16 @@ def execute(work):
         build_env.update(PRIVATE_INPUT_DIR=str(work), PRIVATE_RESULT_DIR=str(result))
         run(['bash', 'private-build.sh'], source, log, build_env, timeout=4 * 3600, progress=progress)
         status = 'passed'
+    except BuildInterrupted:
+        interrupted = True
+        (work / 'interrupted.json').write_text(json.dumps({'phase': PHASE, 'status': 'interrupted'}) + '\n')
+        raise
     except Exception as error:
         # No traceback or exception text is emitted to public output.
         with log.open('a') as stream:
             stream.write('\nPrivate operation exception: ' + repr(error) + '\n')
     finally:
-        if source.exists() and (source / 'collect-private.py').is_file():
+        if not interrupted and source.exists() and (source / 'collect-private.py').is_file():
             try:
                 run(['python3', 'collect-private.py'], source, log, build_env, timeout=1200)
             except Exception:
@@ -195,20 +222,73 @@ def execute(work):
               '--notes', 'Private build output. Inspect result-manifest.json before use.', str(manifest)]
     upload += [str(work / p['name']) for p in parts]
     run(upload, work, work / 'transfer.log', transfer_env, timeout=2400)
+    (work / 'result-uploaded').write_text(status + '\n')
     if status != 'passed':
         raise RuntimeError('Private build failed; inspect private release')
 
 
-def main():
+def recover(work):
+    """Return bounded diagnostics. Never restart the cancelled private build."""
+    if not work.exists() or (work / 'result-uploaded').exists():
+        return
+    spec = json.loads(os.environ.pop('PRIVATE_BUILD_SPEC'))
+    token = os.environ.pop('PRIVATE_TRANSFER_TOKEN')
+    repo = spec['repository']
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+        raise ValueError('Invalid repository')
+    env = dict(os.environ, GH_TOKEN=token, GH_PROMPT_DISABLED='1')
+    meta = subprocess.run(['gh', 'api', 'repos/' + repo], env=env, capture_output=True, check=True, timeout=30)
+    if json.loads(meta.stdout).get('private') is not True:
+        raise ValueError('Recovery repository must be private')
+    run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
+    if not re.fullmatch(r'[0-9]+', run_id) or not re.fullmatch(r'[0-9]+', attempt):
+        raise ValueError('Invalid run identity')
+    diagnostic = work / 'recovery.log'
+    with diagnostic.open('wb') as output:
+        for name in ('interrupted.json', 'result/private.log', 'progress-transfer.log', 'transfer.log'):
+            path = work / name
+            if path.is_file():
+                output.write(('\n--- ' + name + ' ---\n').encode())
+                with path.open('rb') as stream:
+                    stream.seek(max(0, path.stat().st_size - 8 * 1024 ** 2))
+                    shutil.copyfileobj(stream, output)
+    subprocess.run(['gh', 'release', 'create', f'private-recovery-{run_id}-{attempt}',
+                    '--repo', repo, '--title', 'Private interruption diagnostics',
+                    '--notes', 'Partial logs only. No successful build is implied.', str(diagnostic)],
+                   env=env, capture_output=True, check=True, timeout=90)
+
+
+def main(recovery=False):
+    previous = {s: signal.signal(s, interrupt) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
-        with tempfile.TemporaryDirectory(prefix='private-build-') as directory:
-            execute(Path(directory))
+        configured = os.environ.pop('PRIVATE_WORK_DIR', None)
+        if configured:
+            work = Path(configured)
+            if recovery:
+                recover(work)
+            else:
+                work.mkdir(exist_ok=False)
+                execute(work)
+        else:
+            if recovery:
+                raise ValueError('Recovery requires a persistent work directory')
+            with tempfile.TemporaryDirectory(prefix='private-build-') as directory:
+                execute(Path(directory))
+    except BuildInterrupted:
+        print('Build interrupted. The recovery step will return available private logs.', flush=True)
+        return 130
     except Exception:
         print(f'Build failed at {PHASE}. Inspect the private result store.', flush=True)
         return 1
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if recovery:
+        print('Private diagnostic recovery finished.', flush=True)
+        return 0
     print('Build passed. Results are in the private release.', flush=True)
     return 0
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    raise SystemExit(main(recovery='--recover' in sys.argv[1:]))
