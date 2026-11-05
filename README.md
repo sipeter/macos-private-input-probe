@@ -36,3 +36,20 @@ This probe tests one small fixture and selected failure paths.
 It does not prove that arbitrary build scripts or production inputs cannot leak information.
 Standard public hosted runners have GitHub's documented free-compute treatment.
 A successful test does not establish eligibility of a different project's workload or verify an account invoice.
+
+## Recorded integration result
+
+[Run 41978302673](https://github.com/sipeter/macos-private-input-probe/actions/runs/41978302673) passed on 2026-11-05.
+Tested source: `7557686c768bd884e72088503ceec9b5cec43098`.
+The private fixture compiled into an iOS ARM64 executable and a Metal library.
+The unsigned sample IPA and the deliberate compiler-error diagnostic were stored in the private result repository.
+Six portable checks and the downloaded IPA file checks passed.
+The private canary was absent from all four public test logs and the code history checked after the final run.
+There were no public Actions artifacts or cache entries.
+The run timing endpoint returned an empty `billable` object. An account invoice was not independently checked.
+
+The earlier transfer failure came from CRLF in the deploy key secret sent from Windows.
+The tool now normalizes that text before macOS SSH reads the key.
+The test credential was revoked and the three workflow secrets were removed.
+The manual workflow is disabled after the test. Configure a new scoped credential before another authorized run.
+Large result storage, arbitrary private build scripts, and device installation remain outside this test.
