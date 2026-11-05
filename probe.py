@@ -63,6 +63,15 @@ def validate_remote(value):
     return value
 
 
+def normalize_deploy_key(value):
+    # Windows CLI stdin can turn an LF key into CRLF secret text.
+    value = value.replace("\r", "").strip() + "\n"
+    if (not value.startswith("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+            or not value.endswith("\n-----END OPENSSH PRIVATE KEY-----\n")):
+        raise ProbeFailure("Missing test credential.")
+    return value
+
+
 def pack_app(app, destination):
     with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(app.rglob("*")):
@@ -80,13 +89,11 @@ def execute(work):
     PHASE = "fixture-configuration"
     remote = validate_remote(os.environ.pop("FIXTURE_REPOSITORY", ""))
     revision = validate_revision(os.environ.pop("FIXTURE_REVISION", ""))
-    key_text = os.environ.pop("FIXTURE_DEPLOY_KEY", "")
-    if not key_text.startswith("-----BEGIN OPENSSH PRIVATE KEY-----"):
-        raise ProbeFailure("Missing test credential.")
+    key_text = normalize_deploy_key(os.environ.pop("FIXTURE_DEPLOY_KEY", ""))
     key = work / "deploy-key"
     fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-        stream.write(key_text.rstrip() + "\n")
+        stream.write(key_text)
     del key_text
     env = os.environ.copy()
     known_hosts = Path(__file__).resolve().with_name("github_known_hosts")

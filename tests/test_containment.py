@@ -11,6 +11,13 @@ import probe
 
 
 class ContainmentTests(unittest.TestCase):
+    def test_windows_secret_transport_restores_key_lines(self):
+        expected = "-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----\n"
+        self.assertEqual(probe.normalize_deploy_key(expected.replace("\n", "\r\n")), expected)
+        self.assertEqual(probe.normalize_deploy_key(expected.rstrip()), expected)
+        with self.assertRaises(probe.ProbeFailure):
+            probe.normalize_deploy_key("not a credential")
+
     def test_failed_child_output_stays_in_private_log(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "private.log"
