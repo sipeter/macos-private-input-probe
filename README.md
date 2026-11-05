@@ -53,3 +53,30 @@ The tool now normalizes that text before macOS SSH reads the key.
 The test credential was revoked and the three workflow secrets were removed.
 The manual workflow is disabled after the test. Configure a new scoped credential before another authorized run.
 Large result storage, arbitrary private build scripts, and device installation remain outside this test.
+
+## Private release transport
+
+`build_private.py` adds a transport for reviewed private build recipes and large results.
+The owner can run `build-private.yml` manually on a standard ARM64 Mac runner.
+The code downloads SHA-256-pinned source and input assets from a private Release.
+The private source archive supplies `private-build.sh` and `collect-private.py`.
+The build child receives no repository token or Actions output-control paths.
+Both output streams go to a private file. Public output contains fixed status text only.
+The collector gathers results after success or failure.
+The tool compresses the result folder and splits the archive into at most 1 GiB parts.
+It uploads the parts and a complete hash manifest to a new private Release.
+It creates no public Actions artifact or cache.
+
+Set `PRIVATE_BUILD_SPEC` and `PRIVATE_TRANSFER_TOKEN` as repository secrets.
+The spec contains asset names, private release references, full SHA-256 identities,
+and an optional short-lived URL for a private Actions cache.
+The token must be short-lived and limited to the private repository.
+One supported setup uses a temporary self-hosted job in that private repository.
+Its local coordinator supplies the job's repository-scoped token.
+The account's personal credential stays on the coordinator.
+Stop the temporary job and remove both secrets after the build.
+
+This is trusted build orchestration, not a sandbox for hostile build scripts.
+Review a recipe before granting access. GitHub still processes the private inputs.
+The repository name does not change the service terms or establish workload eligibility.
+No device installation is performed by this tool.

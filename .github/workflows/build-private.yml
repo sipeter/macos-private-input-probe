@@ -1,0 +1,32 @@
+name: Private-input iOS build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-input-build
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner && github.event.repository.private == false
+    runs-on: xcode-27
+    timeout-minutes: 290
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: '10.0.x'
+      - name: Check containment and transfer
+        run: python -m unittest discover -s tests -v
+      - name: Compile and return private results
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+          PRIVATE_TRANSFER_TOKEN: ${{ secrets.PRIVATE_TRANSFER_TOKEN }}
+          PRIVATE_BUILD_SPEC: ${{ secrets.PRIVATE_BUILD_SPEC }}
+          PYTHONUNBUFFERED: '1'
+        run: python build_private.py
