@@ -30,6 +30,24 @@ def run_private(command, *, cwd, log, env=None, expected=0, timeout=180):
             output.write((type(error).__name__ + "\n").encode())
             raise ProbeFailure("Private process failed.") from None
     if result.returncode != expected:
+        diagnostic = Path(log).read_bytes()[-16384:]
+        for fragment, category in [
+            (b"invalid format", "ssh-key-format"),
+            (b"error in libcrypto", "ssh-key-format"),
+            (b"Host key verification failed", "ssh-host-verification"),
+            (b"Permission denied (publickey)", "ssh-authentication"),
+            (b"Repository not found", "repository-access"),
+            (b"Could not resolve hostname", "ssh-dns"),
+            (b"Connection refused", "ssh-connection-refused"),
+            (b"Connection timed out", "ssh-connection-timeout"),
+            (b"couldn't find remote ref", "fixture-revision"),
+            (b"cannot run ssh", "ssh-unavailable"),
+            (b"Bad owner or permissions", "ssh-permissions"),
+            (b"bad permissions", "ssh-permissions"),
+            (b"Too many authentication failures", "ssh-authentication-count"),
+        ]:
+            if fragment in diagnostic:
+                raise ProbeFailure("Private process failed: " + category + ".")
         raise ProbeFailure("Private process failed.")
 
 
