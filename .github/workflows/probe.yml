@@ -1,0 +1,29 @@
+name: Private-input compiler probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-input-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner && github.event.repository.private == false
+    runs-on: xcode-27
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check diagnostic containment
+        run: python3 -m unittest discover -s tests -v
+      - name: Build and return the private fixture
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+          FIXTURE_REPOSITORY: ${{ secrets.FIXTURE_REPOSITORY }}
+          FIXTURE_REVISION: ${{ secrets.FIXTURE_REVISION }}
+          FIXTURE_DEPLOY_KEY: ${{ secrets.FIXTURE_DEPLOY_KEY }}
+        run: python3 probe.py
