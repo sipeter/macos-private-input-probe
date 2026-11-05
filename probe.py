@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import zipfile
 
+PHASE = "initialization"
+
 
 class ProbeFailure(Exception):
     """Only fixed public failure messages are allowed."""
@@ -56,6 +58,8 @@ def pack_app(app, destination):
 
 
 def execute(work):
+    global PHASE
+    PHASE = "fixture-configuration"
     remote = validate_remote(os.environ.pop("FIXTURE_REPOSITORY", ""))
     revision = validate_revision(os.environ.pop("FIXTURE_REVISION", ""))
     key_text = os.environ.pop("FIXTURE_DEPLOY_KEY", "")
@@ -84,10 +88,14 @@ def execute(work):
     def command(args, cwd=fixture, **kwargs):
         return run_private(args, cwd=cwd, log=log, env=env, **kwargs)
 
+    PHASE = "fixture-repository-init"
     command(["git", "init", "-b", "main"])
     command(["git", "remote", "add", "origin", remote])
+    PHASE = "fixture-fetch"
     command(["git", "fetch", "--depth=1", "origin", revision])
+    PHASE = "fixture-checkout"
     command(["git", "checkout", "--detach", revision])
+    PHASE = "fixture-validation"
     for filename in ["main.m", "sample.metal", "marker.txt"]:
         path = fixture / filename
         if not path.is_file() or path.is_symlink():
@@ -97,6 +105,7 @@ def execute(work):
         raise ProbeFailure("Invalid private fixture.")
     status = "failed"
     try:
+        PHASE = "toolchain"
         command(["xcodebuild", "-version"])
         command(["xcodebuild", "-downloadComponent", "MetalToolchain"], timeout=420)
         sdk_file = result / "sdk.txt"
@@ -107,18 +116,21 @@ def execute(work):
             raise ProbeFailure("Missing iOS SDK.")
         app = work / "Probe.app"
         app.mkdir()
+        PHASE = "ios-compilation"
         command(["xcrun", "--sdk", "iphoneos", "clang", "-target", "arm64-apple-ios26.0",
                  "-isysroot", sdk, "-fobjc-arc", "-framework", "UIKit", "-framework", "Foundation",
                  "main.m", "-o", str(app / "Probe")])
         header = (app / "Probe").read_bytes()[:8]
         if struct.unpack("<II", header) != (0xfeedfacf, 0x0100000c):
             raise ProbeFailure("Unexpected executable format.")
+        PHASE = "metal-compilation"
         command(["xcrun", "--sdk", "iphoneos", "metal", "-std=metal3.0", "-c", "sample.metal",
                  "-o", str(work / "sample.air")])
         command(["xcrun", "--sdk", "iphoneos", "metallib", str(work / "sample.air"),
                  "-o", str(app / "sample.metallib")])
         if (app / "sample.metallib").read_bytes()[:4] != b"MTLB":
             raise ProbeFailure("Unexpected Metal library format.")
+        PHASE = "ipa-packaging"
         info = {"CFBundleIdentifier": "org.example.PrivateInputProbe", "CFBundleExecutable": "Probe",
                 "CFBundleName": "Probe", "CFBundlePackageType": "APPL", "CFBundleVersion": "1",
                 "CFBundleShortVersionString": "0.1", "MinimumOSVersion": "26.0",
@@ -128,6 +140,7 @@ def execute(work):
         pack_app(app, result / "Probe.ipa")
 
         # A compiler error must carry the canary only to a private diagnostic file.
+        PHASE = "negative-compiler-control"
         (fixture / "negative.c").write_bytes(b"#error " + marker + b"\n")
         negative_log = result / "negative-compiler.log"
         run_private(["xcrun", "clang", "-fsyntax-only", "negative.c"], cwd=fixture,
@@ -140,7 +153,7 @@ def execute(work):
         status = "failed"
 
     ipa = result / "Probe.ipa"
-    report = {"status": status, "fixture_revision": revision,
+    report = {"status": status, "last_build_phase": PHASE, "fixture_revision": revision,
               "marker_sha256": hashlib.sha256(marker).hexdigest(),
               "source_sha256": hashlib.sha256((fixture / "main.m").read_bytes()).hexdigest(),
               "ipa_sha256": hashlib.sha256(ipa.read_bytes()).hexdigest() if ipa.exists() else None,
@@ -161,6 +174,7 @@ def execute(work):
     def publish(args):
         run_private(args, cwd=result, log=upload_log, env=env)
 
+    PHASE = "private-result-upload"
     publish(["git", "init", "-b", branch])
     publish(["git", "config", "user.name", "Build probe"])
     publish(["git", "config", "user.email", "build-probe@users.noreply.github.com"])
@@ -176,8 +190,11 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="private-input-probe-") as directory:
             execute(Path(directory))
+    except ProbeFailure as error:
+        print(f"Probe failed at {PHASE}: {error}")
+        return 1
     except Exception:
-        print("Probe failed. Inspect the private result store.")
+        print(f"Probe failed at {PHASE}. Inspect the private result store.")
         return 1
     print("Probe passed. The unsigned sample and diagnostics are in the private result store.")
     return 0
